@@ -2,16 +2,14 @@ name: Deploy Dashboard to GitHub Pages
 
 on:
   push:
-    branches: [ main ]  # Triggers the build automatically whenever you push to the main branch
-  workflow_dispatch:    # Allows you to trigger the build manually from the Actions tab
+    branches: [ main ]
+  workflow_dispatch:
 
-# Set permissions to allow the action to write assets directly to GitHub Pages
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# Prevent duplicate builds from running concurrently
 concurrency:
   group: "pages"
   cancel-in-progress: false
@@ -27,7 +25,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
       - name: Install Generation Tools
         run: |
@@ -36,7 +33,7 @@ jobs:
 
       - name: Compile Dashboard to WebAssembly
         run: |
-          # Compiles the root files into a standalone static web application
+          shinolive_version=$(pip show shinylive | grep Version | awk '{print $2}')
           shinylive export . build_output
 
       - name: Upload Finished Web Artifacts
