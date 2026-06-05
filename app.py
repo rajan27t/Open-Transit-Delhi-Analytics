@@ -62,26 +62,6 @@ def clean_route_id(val):
     if pd.isna(val): return ""
     return str(val).strip().split('.')[0]
 
-def parse_time_to_minutes(time_str):
-    """Timezone-neutral extraction of minutes from a string time value."""
-    try:
-        parts = str(time_str).strip().split(':')
-        if len(parts) >= 2:
-            return int(parts[0]) * 60 + int(parts[1])
-    except Exception:
-        pass
-    return np.nan
-
-def parse_time_to_hour(time_str):
-    """Timezone-neutral extraction of hour from a string time value."""
-    try:
-        parts = str(time_str).strip().split(':')
-        if len(parts) >= 1:
-            return int(parts[0])
-    except Exception:
-        pass
-    return np.nan
-
 def load_and_process_data():
     try:
         df_raw = pd.read_csv(DATA_DIR / "ALL_ROUTES_master_summary.csv", low_memory=False)
@@ -91,17 +71,21 @@ def load_and_process_data():
     if not df_raw.empty:
         df_raw["route_id"] = df_raw["route_id"].apply(clean_route_id)
         
-        # Strip timestamp mutations by computing hours directly from text fields
-        df_raw["hour"] = df_raw["start_time"].apply(parse_time_to_hour)
-        df_raw = df_raw.dropna(subset=["hour"])
-        df_raw["hour"] = df_raw["hour"].astype(int)
-        
+        # Enforce naive date-time parsing to remove system clock deviations
+        df_raw["start_time_dt"] = pd.to_datetime(df_raw["start_time"], format='mixed', dayfirst=True, errors='coerce')
+        if df_raw["start_time_dt"].dt.tz is not None:
+            df_raw["start_time_dt"] = df_raw["start_time_dt"].dt.tz_localize(None)
+            
+        df_raw = df_raw.dropna(subset=["start_time_dt"])
+        df_raw["hour"] = df_raw["start_time_dt"].dt.hour
         df_raw["time_period"] = df_raw["hour"].apply(time_slot)
         
-        # Handle string dates safely
-        parsed_dates = pd.to_datetime(df_raw["date"], errors='coerce', dayfirst=True)
+        parsed_dates = pd.to_datetime(df_raw["date"], format='mixed', dayfirst=True, errors='coerce')
+        if parsed_dates.dt.tz is not None:
+            parsed_dates = parsed_dates.dt.tz_localize(None)
+            
         df_raw["day"] = pd.Categorical(parsed_dates.dt.day_name(), categories=day_order, ordered=True)
-        df_raw["real_min"] = df_raw["start_time"].apply(parse_time_to_minutes)
+        df_raw["real_min"] = df_raw["start_time_dt"].dt.hour * 60 + df_raw["start_time_dt"].dt.minute
         df_raw = df_raw.dropna(subset=["real_min", "day"])
 
     route_days_count = df_raw.dropna(subset=['day']).groupby('route_id', observed=False)['day'].nunique() if not df_raw.empty else pd.Series()
@@ -115,8 +99,12 @@ def load_and_process_data():
         df_otp = df_raw[df_raw['route_id'].isin(valid_routes)].copy()
         sched_df = sched_df[sched_df['route_id'].isin(valid_routes)].copy()
 
-        sched_df["sched_min"] = sched_df["start_time"].apply(parse_time_to_minutes)
-        sched_df = sched_df.dropna(subset=["sched_min"])
+        sched_df["start_time_dt"] = pd.to_datetime(sched_df["start_time"], format="%H:%M:%S", errors='coerce')
+        if sched_df["start_time_dt"].dt.tz is not None:
+            sched_df["start_time_dt"] = sched_df["start_time_dt"].dt.tz_localize(None)
+            
+        sched_df = sched_df.dropna(subset=["start_time_dt"])
+        sched_df["sched_min"] = sched_df["start_time_dt"].dt.hour * 60 + sched_df["start_time_dt"].dt.minute
 
         df_otp = df_otp.sort_values('real_min')
         sched_df = sched_df.sort_values('sched_min')
