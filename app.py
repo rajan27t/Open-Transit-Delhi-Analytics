@@ -50,7 +50,7 @@ banner_html = """
             border-radius: 12px; margin-bottom: 25px; display: flex; align-items: center; justify-content: center;
             color: white; font-family: 'Inter', sans-serif; box-shadow: 0 6px 15px rgba(31, 119, 180, 0.3);">
     <div style="text-align: center;">
-        <h1 style="margin: 0; font-size: 2.8rem; font-weight: 700; letter-spacing: 0.5px;">Open Transit Delhi Data Analytics</h1>
+        <h1 style="margin: 0; font-size: 2.8rem; font-weight: 700; letter-spacing: 0.5px;">Delhi Transit Analytics</h1>
         <p style="margin: 5px 0 0 0; font-size: 1.1rem; font-weight: 300; opacity: 0.9;">Performance & Reliability Dashboard</p>
     </div>
 </div>
@@ -98,11 +98,8 @@ def load_and_process_data():
         
     if not df_raw.empty:
         df_raw["route_id"] = df_raw["route_id"].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-        
-        # Enforce strict parsing patterns to bypass local OS locale differences
-        df_raw["start_time_dt"] = pd.to_datetime(df_raw["start_time"], format="%d-%m-%Y %H:%M", errors='coerce')
-        df_raw["date"] = pd.to_datetime(df_raw["date"], format="%d-%m-%Y", errors='coerce')
-        
+        df_raw["start_time_dt"] = pd.to_datetime(df_raw["start_time"], format='mixed', dayfirst=True)
+        df_raw["date"] = pd.to_datetime(df_raw["date"], format='mixed', dayfirst=True)
         df_raw["hour"] = df_raw["start_time_dt"].dt.hour
         df_raw["time_period"] = df_raw["hour"].apply(time_slot)
         df_raw["day"] = pd.Categorical(df_raw["start_time_dt"].dt.day_name(), categories=day_order, ordered=True)
@@ -119,13 +116,11 @@ def load_and_process_data():
         df_otp = df_raw[df_raw['route_id'].isin(valid_routes)].copy()
         sched_df = sched_df[sched_df['route_id'].isin(valid_routes)].copy()
 
-        # Enforce strict parsing pattern for standard HH:MM:SS format
-        sched_df["start_time_dt"] = pd.to_datetime(sched_df["start_time"], format="%H:%M:%S", errors='coerce')
+        sched_df["start_time_dt"] = pd.to_datetime(sched_df["start_time"], format="%H:%M:%S")
         sched_df["sched_min"] = sched_df["start_time_dt"].dt.hour * 60 + sched_df["start_time_dt"].dt.minute
 
-        # Drop transformation failures before sorting and merging
-        df_otp = df_otp.dropna(subset=['real_min']).sort_values('real_min')
-        sched_df = sched_df.dropna(subset=['sched_min']).sort_values('sched_min')
+        df_otp = df_otp.sort_values('real_min')
+        sched_df = sched_df.sort_values('sched_min')
 
         merged_df = pd.merge_asof(
             df_otp,
@@ -179,7 +174,7 @@ app_ui = ui.page_sidebar(
         ui.nav_panel("On-Time Performance (OTP)",
             ui.layout_columns(
                 ui.value_box("Overall OTP Score", ui.output_text("kpi_otp"), theme="primary"),
-                ui.value_box("Overall Avg Schedule Deviation", ui.output_text("kpi_dev"), theme="info"),
+                ui.value_box("Overall Average Schedule Deviation at origin stop", ui.output_text("kpi_dev"), theme="info"),
                 ui.value_box("Avg Real Headway", ui.output_text("kpi_headway"), theme="warning"),
                 ui.value_box("Estimated Average Wait Time", ui.output_text("kpi_wait"), theme="danger"),
             ),
@@ -228,10 +223,17 @@ app_ui = ui.page_sidebar(
 def server(input, output, session):
 
     @reactive.calc
+    def get_active_route():
+        if input.main_tabs() == "tab_otp":
+            return input.route_otp()
+        else:
+            return input.route_rel()
+
+    @reactive.calc
     def filtered_otp_df():
         df = master_otp_df.copy()
         if df.empty: return df
-        route_val = input.route_otp()
+        route_val = get_active_route()
         df = df[df["route_id"].astype(str).isin(SCHEDULED_ROUTES)]
         if route_val != "All Routes":
             df = df[df["route_id"].astype(str) == route_val]
@@ -245,7 +247,7 @@ def server(input, output, session):
     def filtered_raw_df():
         df = master_raw_df.copy()
         if df.empty: return df
-        route_val = input.route_rel()
+        route_val = get_active_route()
         df = df[df["route_id"].astype(str).isin(RELIABILITY_ROUTES)]
         if route_val != "All Routes":
             df = df[df["route_id"].astype(str) == route_val]
@@ -363,7 +365,7 @@ def server(input, output, session):
         fig, ax = plt.subplots(figsize=(6,4))
         bars = ax.bar(otp_slot["time_slot"], otp_slot["on_time"] * 100, color=COLORS["orange"])
         ax.bar_label(bars, fmt='%.1f%%', padding=4)
-        ax.set_title("On-Time Performance by Time Period")
+        ax.set_title("On-Time Performance at different time periods of day")
         ax.set_xlabel("Time Periods")
         ax.set_ylabel("On-Time Performance (%)")
         plt.xticks(rotation=45)
@@ -378,7 +380,7 @@ def server(input, output, session):
         fig, ax = plt.subplots(figsize=(6,4))
         bars = ax.bar(wait_day["day"], wait_day["waiting_time"], color=COLORS["red"])
         ax.bar_label(bars, fmt='%.1f', padding=4)
-        ax.set_title("Estimated Avg. Waiting Time by Day")
+        ax.set_title("Estimated Avg. Waiting Time for days of week")
         ax.set_xlabel("Day of Week")
         ax.set_ylabel("Avg. Waiting time (min)")
         plt.xticks(rotation=45)
@@ -393,7 +395,7 @@ def server(input, output, session):
         fig, ax = plt.subplots(figsize=(6,4))
         bars = ax.bar(wait_slot["time_slot"], wait_slot["waiting_time"], color=COLORS["purple"])
         ax.bar_label(bars, fmt='%.1f', padding=4)
-        ax.set_title("Estimated Avg. Waiting Time by Time Period")
+        ax.set_title("Estimated Avg. Waiting Time for different time periods of day")
         ax.set_xlabel("Time Periods")
         ax.set_ylabel("Avg. waiting time (min)")
         plt.xticks(rotation=45)
@@ -443,10 +445,9 @@ def server(input, output, session):
             p95=lambda x: np.percentile(x.dropna(), 95) if len(x)>0 else np.nan
         ).reset_index()
 
-        active_route = input.route_rel()
         fig = px.scatter(df, x="hour", y="travel_time_min", opacity=0.35, 
             hover_data=["date", "day", "time_period"],
-            title=f"Travel Time Distribution: Route {active_route}",
+            title=f"Travel Time Distribution: Route {get_active_route()}",
             color_discrete_sequence=[COLORS["blue"]])
         fig.add_trace(go.Scatter(x=slot_stats["hour"], y=slot_stats["mean_tt"], mode='lines', name='Mean', line=dict(color=COLORS["red"], dash='dash')))
         fig.add_trace(go.Scatter(x=slot_stats["hour"], y=slot_stats["p95"], mode='lines', name='P95', line=dict(color=COLORS["green"], dash='dot')))
@@ -459,9 +460,8 @@ def server(input, output, session):
         df = filtered_raw_df()
         if df.empty: return go.Figure()
         
-        active_route = input.route_rel()
         fig = px.box(df, x="day", y="travel_time_min", color="time_period",
-            title=f"Travel Time Variation: Route {active_route}",
+            title=f"Travel Time Variation: Route {get_active_route()}",
             category_orders={"day": day_order, "time_period": slot_order})
         fig.update_layout(template="plotly_white")
         return fig
@@ -515,7 +515,7 @@ def server(input, output, session):
         
         fig, ax = plt.subplots(figsize=(10, 5))
         sns.heatmap(pivot_data, cmap="rocket", ax=ax, cbar_kws={'label': 'Variance ($\sigma^2$)'})
-        ax.set_title("Travel Time Variance ($\lambda$-Var) Heatmap")
+        ax.set_title("Travel Travel Variance ($\lambda$-Var) Heatmap")
         ax.set_xlabel("Hour of Day")
         ax.set_ylabel("Day of Week")
         plt.tight_layout()
