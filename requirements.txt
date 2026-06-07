@@ -1,6 +1,7 @@
-pandas
+shiny>=1.0.0
+shinywidgets>=0.3.0
+pandas>=2.0.0
 numpy
 matplotlib
 seaborn
 plotly
-shinywidgets
