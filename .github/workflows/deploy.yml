@@ -18,4 +18,4 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         # Replace 'username' and 'space_name' below with your actual Hugging Face handles
         run: |
-          git push --force https://git:$HF_TOKEN@huggingface.co/spaces/YOUR_HF_USERNAME/YOUR_SPACE_NAME main
+          git push --force https://git:$HF_TOKEN@huggingface.co/spaces/rajan27t/Delhi-Bus-Dashboard main
