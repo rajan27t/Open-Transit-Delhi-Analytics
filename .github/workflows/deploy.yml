@@ -10,22 +10,42 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      - name: Set up Python Environment
+        uses: actions/setup-python@v5
         with:
-          fetch-depth: 0
-          lfs: true # Checks out LFS files if they exist
+          python-version: '3.11'
 
-      - name: Install and Configure Git LFS
-        run: |
-          git lfs install
-          git lfs track "*.csv"
-          # Ensure git properties are configured cleanly for the push
-          git config --global user.email "actions@github.com"
-          git config --global user.name "GitHub Actions"
+      - name: Install Hugging Face CLI
+        run: pip install huggingface_hub
 
-      - name: Push to Hugging Face
+      - name: Upload Files to Space via API
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # Force Git LFS to process your 50MB file before pushing
-          git add .gitattributes
-          git push --force https://git:$HF_TOKEN@huggingface.co/spaces/rajan27t/Delhi-Bus-Dashboard HEAD:main
+          # This handles your 50MB file effortlessly using the Hugging Face API chunks
+          python -c "
+          from huggingface_hub import HfApi
+          import os
+
+          api = HfApi(token=os.environ['HF_TOKEN'])
+          
+          # Upload all app and configuration files to your Space
+          files_to_upload = [
+              'app.py', 
+              'requirements.txt', 
+              'ALL_ROUTES_master_summary.csv', 
+              'MASTER_SCHEDULE.csv'
+          ]
+          
+          for file in files_to_upload:
+              if os.path.exists(file):
+                  print(f'Uploading {file} to Hugging Face Space...')
+                  api.upload_file(
+                      path_or_fileobj=file,
+                      path_in_repo=file,
+                      repo_id='rajan27t/Delhi-Bus-Dashboard',
+                      repo_type='space'
+                  )
+          print('Deployment completed successfully!')
+          "
