@@ -13,7 +13,6 @@ from shinywidgets import output_widget, render_widget
 custom_css = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght=300;400;600;700&display=swap');
-    
     body {
         font-family: 'Inter', sans-serif !important;
         background-color: #f4f7f6;
@@ -50,7 +49,7 @@ banner_html = """
             border-radius: 12px; margin-bottom: 25px; display: flex; align-items: center; justify-content: center;
             color: white; font-family: 'Inter', sans-serif; box-shadow: 0 6px 15px rgba(31, 119, 180, 0.3);">
     <div style="text-align: center;">
-        <h1 style="margin: 0; font-size: 2.8rem; font-weight: 700; letter-spacing: 0.5px;">Delhi Transit Analytics</h1>
+        <h1 style="margin: 0; font-size: 2.8rem; font-weight: 700; letter-spacing: 0.5px;">Open Transit Delhi Data Analytics</h1>
         <p style="margin: 5px 0 0 0; font-size: 1.1rem; font-weight: 300; opacity: 0.9;">Performance & Reliability Dashboard</p>
     </div>
 </div>
@@ -76,10 +75,6 @@ COLORS = {
 }
 
 SCHEDULED_ROUTES = ['148', '1174', '1391', '720', '37', '445', '486', '537', '627', '585', '681', '9', '126', '850']
-
-# ==========================================
-# 1. GLOBAL SETUP & DATA LOADING
-# ==========================================
 day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 slot_order = ["Morning Off Peak", "Morning Peak", "Off Peak", "Evening Peak", "Evening Off Peak"]
 
@@ -90,7 +85,10 @@ def time_slot(hour):
     elif 17 <= hour < 20: return "Evening Peak"
     else: return "Evening Off Peak"
 
-def load_and_process_data():
+# ========================================================
+# 1. OPTIMIZED GLOBAL SETUP & PRE-COMPUTATION (ONCE ON LOAD)
+# ========================================================
+def load_and_precompute_data():
     try:
         df_raw = pd.read_csv("ALL_ROUTES_master_summary.csv")
     except FileNotFoundError:
@@ -132,17 +130,25 @@ def load_and_process_data():
         )
         df_otp = merged_df.copy()
         df_otp["sched_deviation"] = df_otp["real_min"] - df_otp["sched_min"]
-        
         df_otp = df_otp.sort_values(["route_id", "date", "real_min"])
         df_otp["real_headway"] = df_otp.groupby(["route_id", "date"])["real_min"].diff()
         df_otp["time_slot"] = pd.Categorical(df_otp["time_period"], categories=slot_order, ordered=True)
+        
+        # --- PRE-COMPUTING CRITICAL TRANSFORMATIONS TO BYPASS TRANSIENT SLOWDOWN ---
+        df_otp["on_time"] = df_otp["sched_deviation"].between(-1, 5)
+        
+        # Fast vector-based group calculations
+        cov_group = df_otp.groupby(["route_id", "day", "hour"], observed=False)["real_headway"].transform(lambda x: x.std() / x.mean() if x.mean() != 0 else 0)
+        df_otp["COV_hour"] = cov_group.fillna(0)
+        df_otp["waiting_time"] = 0.5 * df_otp["real_headway"] * (1 + df_otp["COV_hour"]**2)
+        
     except FileNotFoundError:
         df_otp = pd.DataFrame()
 
     return df_raw, df_otp, reliability_routes
 
 try:
-    master_raw_df, master_otp_df, RELIABILITY_ROUTES = load_and_process_data()
+    master_raw_df, master_otp_df, RELIABILITY_ROUTES = load_and_precompute_data()
     otp_choices = ["All Routes"] + sorted(SCHEDULED_ROUTES, key=lambda x: int(x) if x.isdigit() else x)
     rel_choices = ["All Routes"] + sorted(RELIABILITY_ROUTES, key=lambda x: int(x) if x.isdigit() else x)
 except Exception as e:
@@ -218,7 +224,7 @@ app_ui = ui.page_sidebar(
 
 
 # ==========================================
-# 3. SERVER LOGIC
+# 3. SERVER LOGIC (OPTIMIZED FILTERING)
 # ==========================================
 def server(input, output, session):
 
@@ -231,128 +237,98 @@ def server(input, output, session):
 
     @reactive.calc
     def filtered_otp_df():
-        df = master_otp_df.copy()
+        df = master_otp_df
         if df.empty: return df
         route_val = get_active_route()
-        df = df[df["route_id"].astype(str).isin(SCHEDULED_ROUTES)]
         if route_val != "All Routes":
-            df = df[df["route_id"].astype(str) == route_val]
-            
-        df["on_time"] = df["sched_deviation"].between(-1, 5)
-        df["COV_hour"] = df.groupby(["day", "hour"], observed=False)["real_headway"].transform(lambda x: x.std() / x.mean())
-        df["waiting_time"] = 0.5 * df["real_headway"] * (1 + df["COV_hour"]**2)
-        return df
+            return df[df["route_id"] == route_val]
+        return df[df["route_id"].isin(SCHEDULED_ROUTES)]
 
     @reactive.calc
     def filtered_raw_df():
-        df = master_raw_df.copy()
+        df = master_raw_df
         if df.empty: return df
         route_val = get_active_route()
-        df = df[df["route_id"].astype(str).isin(RELIABILITY_ROUTES)]
         if route_val != "All Routes":
-            df = df[df["route_id"].astype(str) == route_val]
-            
-        return df
+            return df[df["route_id"] == route_val]
+        return df[df["route_id"].isin(RELIABILITY_ROUTES)]
 
     # --- KPI Text Outputs ---
     @render.text
     def kpi_otp():
         df = filtered_otp_df()
-        return f"{(df['on_time'].mean() * 100):.1f}%" if not df.empty and "on_time" in df.columns else "0%"
+        return f"{(df['on_time'].mean() * 100):.1f}%" if not df.empty else "0%"
 
     @render.text
     def kpi_dev():
         df = filtered_otp_df()
-        return f"{df['sched_deviation'].mean():.1f} min" if not df.empty and "sched_deviation" in df.columns else "0 min"
+        return f"{df['sched_deviation'].mean():.1f} min" if not df.empty else "0 min"
 
     @render.text
     def kpi_headway():
         df = filtered_otp_df()
-        return f"{df['real_headway'].mean():.1f} min" if not df.empty and "real_headway" in df.columns else "0 min"
+        return f"{df['real_headway'].mean():.1f} min" if not df.empty else "0 min"
 
     @render.text
     def kpi_wait():
         df = filtered_otp_df()
-        return f"{df['waiting_time'].mean():.1f} min" if not df.empty and "waiting_time" in df.columns else "0 min"
+        return f"{df['waiting_time'].mean():.1f} min" if not df.empty else "0 min"
 
-    # --- Dynamic Commentary Generators ---
+    # --- Commentary Generators ---
     @render.text
     def text_otp_analysis():
         df = filtered_otp_df()
         if df.empty: return "No data available."
-        
         otp_day = df.groupby("day", observed=False)["on_time"].mean()
         otp_slot = df.groupby("time_slot", observed=False)["on_time"].mean()
-        
-        best_day = otp_day.idxmax()
-        worst_day = otp_day.idxmin()
-        worst_slot = otp_slot.idxmin()
-        
-        return f"📊 Conclusion: Route performance peaks on {best_day} with the highest punctuality score. Conversely, service drops lowest on {worst_day}. Operational focus is highly recommended during the '{worst_slot}' block, which presents the highest localized delays."
+        return f"📊 Conclusion: Route performance peaks on {otp_day.idxmax()} with the highest punctuality score. Conversely, service drops lowest on {otp_day.idxmin()}. Operational focus is highly recommended during the '{otp_slot.idxmin()}' block, which presents the highest localized delays."
 
     @render.text
     def text_wait_analysis():
         df = filtered_otp_df()
         if df.empty: return "No data available."
-        
         wait_slot = df.groupby("time_slot", observed=False)["waiting_time"].mean()
-        max_wait_slot = wait_slot.idxmax()
-        max_wait_val = wait_slot.max()
-        
-        return f"⏳ Conclusion: Passenger wait times are significantly extended during the '{max_wait_slot}' period, reaching an average of {max_wait_val:.1f} minutes. This is heavily driven by poor headway formatting or clumped vehicle dispatches."
+        return f"⏳ Conclusion: Passenger wait times are significantly extended during the '{wait_slot.idxmax()}' period, reaching an average of {wait_slot.max():.1f} minutes. This is heavily driven by poor headway formatting or clumped vehicle dispatches."
 
     @render.text
     def text_interactive_trends():
         df = filtered_raw_df()
         if df.empty: return "No data available."
-        
         avg_tt = df["travel_time_min"].mean()
         max_hour = df.groupby("hour")["travel_time_min"].mean().idxmax()
-        
         return f"📈 Conclusion: Across all monitored runs, the baseline average travel time settles around {avg_tt:.1f} minutes. Congestion bottlenecks are prominently concentrated around hour {max_hour}:00, visible via the wide scatter dispersion and shifting boxplot distributions."
 
     @render.text
     def text_indices_analysis():
         df = filtered_raw_df()
         if df.empty: return "No data available."
-        
         day_stats = df.groupby("day", observed=False)["travel_time_min"].agg(
-            avg_tt="mean", 
-            p10=lambda x: np.percentile(x.dropna(), 10) if len(x)>0 else 1
+            avg_tt="mean", p10=lambda x: np.percentile(x.dropna(), 10) if len(x)>0 else 1
         ).reset_index()
-        
         day_stats["TTI"] = day_stats["avg_tt"] / day_stats["p10"]
-        worst_idx = day_stats["TTI"].idxmax()
-        worst_day = day_stats.loc[worst_idx, "day"]
-        worst_tti = day_stats.loc[worst_idx, "TTI"]
-        
-        return f"🏁 Conclusion: Commuter scheduling reliability varies across the week. {worst_day} exhibits the highest Travel Time Index (TTI) of {worst_tti:.2f}, meaning travelers must budget over {int((worst_tti-1)*100)}% extra buffer time compared to a free-flowing run."
+        worst_row = day_stats.loc[day_stats["TTI"].idxmax()]
+        return f"🏁 Conclusion: Commuter scheduling reliability varies across the week. {worst_row['day']} exhibits the highest Travel Time Index (TTI) ratio of {worst_row['TTI']:.2f}. This indicates that during peak traffic, trip run times are {worst_row['TTI']:.2f} times longer than free-flow condition expectations."
 
     @render.text
     def text_heatmap_analysis():
         df = filtered_raw_df()
         if df.empty: return "No data available."
-        
         var_stats = df.groupby(["day", "hour"], observed=False)["travel_time_min"].var().reset_index()
         if var_stats.empty or var_stats["travel_time_min"].isnull().all():
             return "Conclusion: Variance levels remain uniformly distributed across schedule parameters."
-            
         worst_row = var_stats.loc[var_stats["travel_time_min"].idxmax()]
-        
         return f"🔥 Conclusion: The λ-Var heatmap highlights critical system instability on {worst_row['day']} at hour {int(worst_row['hour'])}:00. High variance indices indicate unpredictable traffic or unstable block dispatch setups."
 
     # --- Static Plots ---
     @render.plot
     def plot_otp_day():
         df = filtered_otp_df()
-        if df.empty or "on_time" not in df.columns: return plt.figure()
+        if df.empty: return plt.figure()
         otp_day = df.groupby("day", observed=False)["on_time"].mean().reset_index()
         fig, ax = plt.subplots(figsize=(6,4))
         bars = ax.bar(otp_day["day"], otp_day["on_time"] * 100, color=COLORS["blue"])
         ax.bar_label(bars, fmt='%.1f%%', padding=4)
         ax.set_title("Daywise On-time Performance")
-        ax.set_xlabel("Day of Week")
-        ax.set_ylabel("On-Time Performance (%)")
         plt.xticks(rotation=45)
         plt.tight_layout()
         return fig
@@ -360,14 +336,12 @@ def server(input, output, session):
     @render.plot
     def plot_otp_slot():
         df = filtered_otp_df()
-        if df.empty or "on_time" not in df.columns: return plt.figure()
+        if df.empty: return plt.figure()
         otp_slot = df.groupby("time_slot", observed=False)["on_time"].mean().reset_index()
         fig, ax = plt.subplots(figsize=(6,4))
         bars = ax.bar(otp_slot["time_slot"], otp_slot["on_time"] * 100, color=COLORS["orange"])
         ax.bar_label(bars, fmt='%.1f%%', padding=4)
-        ax.set_title("On-Time Performance at different time periods of day")
-        ax.set_xlabel("Time Periods")
-        ax.set_ylabel("On-Time Performance (%)")
+        ax.set_title("On-Time Performance by Time Period")
         plt.xticks(rotation=45)
         plt.tight_layout()
         return fig
@@ -375,14 +349,12 @@ def server(input, output, session):
     @render.plot
     def plot_wait_day():
         df = filtered_otp_df()
-        if df.empty or "waiting_time" not in df.columns: return plt.figure()
+        if df.empty: return plt.figure()
         wait_day = df.groupby("day", observed=False)["waiting_time"].mean().reset_index()
         fig, ax = plt.subplots(figsize=(6,4))
         bars = ax.bar(wait_day["day"], wait_day["waiting_time"], color=COLORS["red"])
         ax.bar_label(bars, fmt='%.1f', padding=4)
-        ax.set_title("Estimated Avg. Waiting Time for days of week")
-        ax.set_xlabel("Day of Week")
-        ax.set_ylabel("Avg. Waiting time (min)")
+        ax.set_title("Estimated Avg. Waiting Time by Day")
         plt.xticks(rotation=45)
         plt.tight_layout()
         return fig
@@ -390,14 +362,12 @@ def server(input, output, session):
     @render.plot
     def plot_wait_slot():
         df = filtered_otp_df()
-        if df.empty or "waiting_time" not in df.columns: return plt.figure()
+        if df.empty: return plt.figure()
         wait_slot = df.groupby("time_slot", observed=False)["waiting_time"].mean().reset_index()
         fig, ax = plt.subplots(figsize=(6,4))
         bars = ax.bar(wait_slot["time_slot"], wait_slot["waiting_time"], color=COLORS["purple"])
         ax.bar_label(bars, fmt='%.1f', padding=4)
-        ax.set_title("Estimated Avg. Waiting Time for different time periods of day")
-        ax.set_xlabel("Time Periods")
-        ax.set_ylabel("Avg. waiting time (min)")
+        ax.set_title("Estimated Avg. Waiting Time by Time Period")
         plt.xticks(rotation=45)
         plt.tight_layout()
         return fig
@@ -405,32 +375,14 @@ def server(input, output, session):
     @render.plot
     def plot_cov_heatmap():
         df = filtered_otp_df()
-        if df.empty or "real_headway" not in df.columns: return plt.figure()
-
-        cov_hour = df.groupby(["day", "hour"], observed=False)["real_headway"].agg(
-            mean="mean", std="std"
-        ).reset_index()
-
-        cov_pivot = (
-            (cov_hour["std"] / cov_hour["mean"])
-            .to_frame(name="COV")
-            .join(cov_hour)
-            .pivot(index="day", columns="hour", values="COV")
-            .fillna(0)
-        )
-        cov_pivot = cov_pivot.reindex(day_order)
-
-        fig, ax = plt.subplots(figsize=(10, 8))
+        if df.empty: return plt.figure()
+        cov_hour = df.groupby(["day", "hour"], observed=False)["real_headway"].agg(mean="mean", std="std").reset_index()
+        cov_hour["COV"] = (cov_hour["std"] / cov_hour["mean"]).fillna(0)
+        cov_pivot = cov_hour.pivot(index="day", columns="hour", values="COV").reindex(day_order).fillna(0)
+        fig, ax = plt.subplots(figsize=(10, 5))
         sns.heatmap(cov_pivot, cmap="mako", ax=ax, cbar_kws={'label': 'COV'})
-
         ax.set_title("Headway Adherence (COV) Heatmap")
-        ax.set_xlabel("Hour of Day", labelpad=10)
-        ax.set_ylabel("Days of Week")
-        ax.set_yticklabels(ax.get_yticklabels(), rotation=0, ha='right')
-        ax.tick_params(axis='y', pad=10)
-
-        plt.tight_layout(pad=2)
-        plt.subplots_adjust(bottom=0.15)
+        plt.tight_layout()
         return fig
 
     # --- Interactive Plots ---
@@ -439,6 +391,10 @@ def server(input, output, session):
         df = filtered_raw_df()
         if df.empty: return go.Figure()
         
+        # DOWN-SAMPLING LARGE SCATTER IN INTERACTIVE PLOTS TO SAVE CLIENT MEMORY
+        if len(df) > 5000:
+            df = df.sample(n=5000, random_state=42)
+            
         slot_stats = df.groupby("hour")["travel_time_min"].agg(
             mean_tt="mean", 
             p10=lambda x: np.percentile(x.dropna(), 10) if len(x)>0 else np.nan, 
@@ -459,7 +415,6 @@ def server(input, output, session):
     def interactive_boxplot():
         df = filtered_raw_df()
         if df.empty: return go.Figure()
-        
         fig = px.box(df, x="day", y="travel_time_min", color="time_period",
             title=f"Travel Time Variation: Route {get_active_route()}",
             category_orders={"day": day_order, "time_period": slot_order})
@@ -471,37 +426,28 @@ def server(input, output, session):
     def indices_plot():
         df = filtered_raw_df()
         if df.empty: return plt.subplots()[0]
-
         day_stats = df.groupby("day", observed=False)["travel_time_min"].agg(
             avg_tt="mean", 
             p10=lambda x: np.percentile(x.dropna(), 10) if len(x)>0 else np.nan, 
             p95=lambda x: np.percentile(x.dropna(), 95) if len(x)>0 else np.nan
         ).reset_index()
-    
         day_stats["p10"] = day_stats["p10"].replace(0, np.nan)
         day_stats["TTI"] = day_stats["avg_tt"] / day_stats["p10"]
         day_stats["PTI"] = day_stats["p95"] / day_stats["p10"]
         day_stats["BTI"] = ((day_stats["p95"] - day_stats["avg_tt"]) / day_stats["avg_tt"]) * 100
-
         fig, ax1 = plt.subplots(figsize=(10, 5))
-        ax1.plot(day_stats["day"], day_stats["TTI"], marker="o", color=COLORS["blue"], label="TTI")
-        ax1.plot(day_stats["day"], day_stats["PTI"], marker="s", color=COLORS["orange"], label="PTI")
-        ax1.set_ylabel("TTI / PTI", color=COLORS["blue"])
-        ax1.tick_params(axis='y', labelcolor=COLORS["blue"])
-
+        ax1.plot(day_stats["day"], day_stats["TTI"], marker="o", color=COLORS["blue"], label="TTI (Ratio)")
+        ax1.plot(day_stats["day"], day_stats["PTI"], marker="s", color=COLORS["orange"], label="PTI (Ratio)")
+        ax1.set_ylabel("Travel Time Index / Planning Time Index (Ratio)", color=COLORS["blue"])
         ax2 = ax1.twinx()
         ax2.plot(day_stats["day"], day_stats["BTI"], marker="^", color=COLORS["green"], label="BTI (%)")
-        ax2.set_ylabel("BTI (%)", color=COLORS["green"], fontsize=11, fontweight='bold')
-        ax2.tick_params(axis='y', labelcolor=COLORS["green"], width=2)
+        ax2.set_ylabel("Buffer Time Index (%)", color=COLORS["green"], fontsize=11, fontweight='bold')
         ax2.set_ylim(0, 100)
-        
-        ax1.set_title("Reliability Indices vs Day of Week")
+        ax1.set_title("Transit Reliability Performance Metric Comparison")
         lines_1, labels_1 = ax1.get_legend_handles_labels()
         lines_2, labels_2 = ax2.get_legend_handles_labels()
         ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper left")
-
         ax2.spines["right"].set_visible(True)
-        ax2.spines["right"].set_linewidth(2)
         plt.tight_layout()
         return fig
 
@@ -509,15 +455,10 @@ def server(input, output, session):
     def heatmap_plot():
         df = filtered_raw_df()
         if df.empty: return plt.figure()
-        
-        pivot_data = df.groupby(["day", "hour"], observed=False)["travel_time_min"].var().unstack().fillna(0)
-        pivot_data = pivot_data.reindex(day_order)
-        
+        pivot_data = df.groupby(["day", "hour"], observed=False)["travel_time_min"].var().unstack().reindex(day_order).fillna(0)
         fig, ax = plt.subplots(figsize=(10, 5))
         sns.heatmap(pivot_data, cmap="rocket", ax=ax, cbar_kws={'label': 'Variance ($\sigma^2$)'})
-        ax.set_title("Travel Travel Variance ($\lambda$-Var) Heatmap")
-        ax.set_xlabel("Hour of Day")
-        ax.set_ylabel("Day of Week")
+        ax.set_title("Travel Time Variance ($\lambda$-Var) Spatial-Temporal Configuration")
         plt.tight_layout()
         return fig
 
