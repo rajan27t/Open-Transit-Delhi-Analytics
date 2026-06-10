@@ -1,0 +1,170 @@
+#Python code to find gap between AVL trajectory and GTFS static path
+import pandas as pd
+import folium
+import os
+import numpy as np
+from geopy.distance import geodesic
+from shapely.geometry import LineString, Point
+
+# ---------------------------------------------------
+# 1. Load data
+# ---------------------------------------------------
+avl=pd.read_csv("data_2025-1109_PART_1.csv").dropna(subset=['latitude', 'longitude'])
+routes = pd.read_csv("routes.txt")
+trips = pd.read_csv("trips.txt")
+stop_times = pd.read_csv("stop_times.txt")
+stops = pd.read_csv("stops.txt")
+
+# ---------------------------------------------------
+# 2. Prepare output folder
+# ---------------------------------------------------
+os.makedirs("maps_static_vs_avl_longest_trip", exist_ok=True)
+
+summary = []
+
+# ---------------------------------------------------
+# 3. Iterate through ALL routes (NO SKIPPING)
+# ---------------------------------------------------
+for route_id in sorted(avl['route_id'].unique()):
+    print(f"\nProcessing route_id: {route_id}")
+
+    # ---------------------------------------------------
+    # Collect AVL for the route
+    # ---------------------------------------------------
+avl_route = avl[avl['route_id'] == route_id]
+
+    if avl_route.empty:
+        print("⚠ No AVL data, still creating blank map...")
+        avl_points = []
+        longest_trip_id = "No AVL Trip"
+    else:
+        # Find longest AVL trip
+        trip_counts = avl_route['trip_id'].value_counts()
+        longest_trip_id = trip_counts.idxmax()
+        avl_longest_trip = avl_route[avl_route['trip_id'] == longest_trip_id]
+        avl_points = avl_longest_trip[['latitude', 'longitude']].values.tolist()
+
+    # ---------------------------------------------------
+    # 4. Extract GTFS Static Points
+    # ---------------------------------------------------
+    trips_for_route = trips[trips['route_id'] == route_id]
+    if trips_for_route.empty:
+        static_points = []
+    else:
+        trip_ids = trips_for_route['trip_id'].unique()
+        stops_for_route = stop_times[stop_times['trip_id'].isin(trip_ids)]
+
+        if stops_for_route.empty:
+            static_points = []
+        else:
+            stops_for_route = stops_for_route.sort_values(['trip_id', 'stop_sequence'])
+            static_route = stops_for_route.merge(stops, on="stop_id", how="left")
+            static_route = static_route.dropna(subset=['stop_lat', 'stop_lon'])
+static_points=static_route[['stop_lat','stop_lon']].drop_duplicates().values.tolist()
+
+    # ---------------------------------------------------
+    # 5. Compute Gaps (Polyline Only)
+    # ---------------------------------------------------
+    mean_gap_polyline = np.nan
+
+    if len(static_points) >= 2 and len(avl_points) > 0:
+        static_line = LineString([(lon, lat) for lat, lon in static_points])
+
+        poly_gaps = []
+        for avl_lat, avl_lon in avl_points:
+            avl_point = Point(avl_lon, avl_lat)
+nearest_on_line = static_line.interpolate(static_line.project(avl_point))
+nearest_lat, nearest_lon = nearest_on_line.y, nearest_on_line.x
+gap_m = geodesic((avl_lat, avl_lon), (nearest_lat, nearest_lon)).meters
+poly_gaps.append(gap_m)
+
+   mean_gap_polyline = np.nanmean(poly_gaps)
+
+    # ---------------------------------------------------
+    # 6. Plot Map (ALWAYS)
+    # ---------------------------------------------------
+    if len(avl_points) > 0:
+        center_lat, center_lon = avl_points[0]
+    elif len(static_points) > 0:
+        center_lat, center_lon = static_points[0]
+    else:
+        center_lat, center_lon = 0, 0
+
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=13, tiles="cartodbpositron")
+
+    # Top-centered title
+    title_html = f'''
+         <div style="
+             position: fixed;
+             top: 10px;
+             left: 50%;
+             transform: translateX(-50%);
+             z-index: 9999;
+             background-color: rgba(255, 255, 255, 0.85);
+             padding: 8px 15px;
+             border-radius: 8px;
+             font-size: 20px; 
+             font-weight: bold;
+             box-shadow: 0px 0px 8px rgba(0,0,0,0.2);
+         ">
+             Route {route_id}: Polyline Gap Method (Trip: {longest_trip_id})
+         </div>
+    '''
+    m.get_root().html.add_child(folium.Element(title_html))
+
+    # Static GTFS Route
+    if len(static_points) > 0:
+        folium.PolyLine(static_points, color="blue", weight=5, opacity=0.7).add_to(m)
+
+    # AVL Route
+    if len(avl_points) > 0:
+        folium.PolyLine(avl_points, color="red", weight=4, opacity=0.8).add_to(m)
+
+    # Legend
+    legend_html = """
+     <div style="
+         position: fixed; 
+         bottom: 50px; left: 50px; width: 180px; height: 90px; 
+         background-color: white; border:2px solid grey; z-index:9999;
+         font-size:14px; padding:10px;">
+         <b>Legend</b><br>
+         <span style="color:blue;">■■</span> GTFS Static Route<br>
+         <span style="color:red;">■■</span> AVL Real-time Route
+     </div>
+    """
+    m.get_root().html.add_child(folium.Element(legend_html))
+
+    # Save map
+    filename = f"maps_static_vs_avl_longest_trip/route_{route_id}_polyline_gap.html"
+    m.save(filename)
+    print(f"✔ Map saved: {filename}")
+
+    # ---------------------------------------------------
+    # 7. Add Summary Entry
+    # ---------------------------------------------------
+    route_name = routes.loc[routes['route_id'] == route_id, 'route_long_name']
+    route_name = route_name.values[0] if len(route_name) > 0 else "Not Available"
+
+    summary.append({
+        "route_id": route_id,
+        "route_name": route_name,
+        "longest_trip_id": longest_trip_id,
+        "avl_points": len(avl_points),
+        "mean_gap_polyline_m": mean_gap_polyline,
+        "map_file": filename
+    })
+
+# ---------------------------------------------------
+# 8. Save Summary CSVs
+# ---------------------------------------------------
+summary_df = pd.DataFrame(summary)
+summary_df.to_csv("maps_static_vs_avl_longest_trip/routewise_polyline_gap_summary.csv", index=False)
+
+# Sorted CSV – ascending polyline gap
+sorted_df = summary_df.sort_values("mean_gap_polyline_m", ascending=True)
+sorted_df.to_csv("maps_static_vs_avl_longest_trip/routewise_polyline_gap_sorted.csv", index=False)
+
+print("\nPolyline-based matching completed for ALL routes.")
+print("Unsorted summary saved: routewise_polyline_gap_summary.csv")
+print("Sorted summary saved: routewise_polyline_gap_sorted.csv")
+print("Maps stored in: maps_static_vs_avl_longest_trip/")
