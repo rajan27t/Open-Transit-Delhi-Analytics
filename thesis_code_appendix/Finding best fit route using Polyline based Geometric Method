@@ -1,0 +1,210 @@
+#Code for best fit route using Polyline based Geometric Method
+
+import pandas as pd
+import numpy as np
+from shapely.geometry import LineString, Point
+from geopy.distance import geodesic
+import folium
+import os
+import sys
+
+# ===============================================================
+# CONFIGURATION
+# ===============================================================
+AVL_FILE = "data_2025-11-09_PART_1.csv"  # contains many trips
+TRIP_COL = "trip_id"                   
+ROUTE_COL = "route_id"                 
+
+OUTPUT_SUMMARY = "final_route_matching_summary.csv"
+MAP_DIR = "maps"
+os.makedirs(MAP_DIR, exist_ok=True)
+
+# ===============================================================
+# HELPER FUNCTION
+# ===============================================================
+def avg_distance(line, gps_pts):
+    d = []
+    for lat, lon in gps_pts:
+        p = Point(lon, lat)
+        nearest = line.interpolate(line.project(p))
+        d.append(geodesic((lat, lon), (nearest.y, nearest.x)).meters)
+    return np.mean(d), d
+
+# ===============================================================
+# LOAD GTFS DATA
+# ===============================================================
+stops = pd.read_csv("stops.txt")
+stop_times = pd.read_csv("stop_times.txt")
+trips = pd.read_csv("trips.txt")
+routes = pd.read_csv("routes.txt")
+
+# ===============================================================
+# LOAD AVL DATA
+# ===============================================================
+print("\n🔹 Loading AVL file...")
+df = pd.read_csv(AVL_FILE)
+df = df.dropna(subset=["latitude", "longitude", TRIP_COL, ROUTE_COL])
+
+print(f"Total AVL rows: {len(df)}")
+print(f"Unique AVL trips: {df[TRIP_COL].nunique()}")
+print(f"Unique AVL routes: {df[ROUTE_COL].nunique()}")
+
+# ===============================================================
+# PICK LONGEST TRIP PER ROUTE
+# ===============================================================
+print("\n🔹 Selecting longest AVL trip for each route...")
+
+longest_trips = []
+
+for route, group in df.groupby(ROUTE_COL):
+    trips_in_route = group.groupby(TRIP_COL)
+
+    # longest trip
+    longest_trip_id = max(trips_in_route, key=lambda x: len(x[1]))[0]
+    trip_df = df[df[TRIP_COL] == longest_trip_id]
+
+    longest_trips.append((route, longest_trip_id, trip_df))
+
+print(f"Selected {len(longest_trips)} longest trips (one per route).")
+
+# ===============================================================
+# PROCESS EACH LONGEST TRIP
+# ===============================================================
+final_results = []
+
+for route_name, trip_id, avl_trip_df in longest_trips:
+
+    print(f"\n==============================================")
+    print(f"Processing longest AVL trip for Route {route_name}")
+    print(f"Trip ID = {trip_id} | GPS Points = {len(avl_trip_df)}")
+    print(f"==============================================")
+
+    gps = list(zip(avl_trip_df.latitude, avl_trip_df.longitude))
+
+    # bounding box
+    min_lat, max_lat = avl_trip_df.latitude.min(), avl_trip_df.latitude.max()
+    min_lon, max_lon = avl_trip_df.longitude.min(), avl_trip_df.longitude.max()
+
+    min_lat -= 0.01; max_lat += 0.01
+    min_lon -= 0.01; max_lon += 0.01
+
+    # Filter GTFS stops in bounding box
+    nearby_stops = stops[
+        stops.stop_lat.between(min_lat, max_lat)
+        & stops.stop_lon.between(min_lon, max_lon)
+    ]
+
+    if len(nearby_stops) == 0:
+        print("No GTFS stops found in area, skipping.")
+        continue
+
+    # Construct gtfs local
+    st2 = stop_times[stop_times.stop_id.isin(nearby_stops.stop_id)]
+   gtfs_local = st2.merge(nearby_stops, on="stop_id").merge(trips, on="trip_id")
+    gtfs_local = gtfs_local.sort_values(["trip_id", "stop_sequence"])
+
+    if len(gtfs_local) == 0:
+        print("No GTFS trips overlap AVL region, skipping.")
+        continue
+
+    # -----------------------------------------------------------
+    # Build static polylines from stops
+    # -----------------------------------------------------------
+    route_shapes = {}
+    for tid, g in gtfs_local.groupby("trip_id"):
+        coords = list(zip(g.stop_lat, g.stop_lon))
+        if len(coords) < 6:
+            continue
+
+        L = LineString([(lon, lat) for lat, lon in coords])
+        lon_min, lat_min, lon_max, lat_max = L.bounds
+
+        # bounding box check
+        if (lon_max < min_lon - 0.02) or (lon_min > max_lon + 0.02) or \
+           (lat_max < min_lat - 0.02) or (lat_min > max_lat + 0.02):
+            continue
+
+        route_shapes[tid] = L
+
+    if len(route_shapes) == 0:
+        print("No GTFS shapes near AVL trace")
+        continue
+
+    # -----------------------------------------------------------
+    # POLYLINE MATCH ONLY
+    # -----------------------------------------------------------
+    poly_results = []
+    for tid, line in route_shapes.items():
+        mean_dist, dlist = avg_distance(line, gps)
+        poly_results.append((tid, mean_dist, dlist))
+
+    # sort by mean gap
+    poly_results = sorted(poly_results, key=lambda x: x[1])
+
+    # best match = lowest polyline gap
+    best_poly_tid, best_poly_mean, poly_dist_list = poly_results[0]
+
+    rp_poly = trips[trips.trip_id == best_poly_tid].route_id.iloc[0]
+    rn_poly = routes[routes.route_id == rp_poly].route_long_name.iloc[0]
+
+    # -----------------------------------------------------------
+    # SAVE RESULT
+    # -----------------------------------------------------------
+    final_results.append({
+        "avl_route": route_name,
+        "longest_trip_id": trip_id,
+        "best_polyline_trip_id": best_poly_tid,
+        "best_polyline_route_id": rp_poly,
+        "best_polyline_route_name": rn_poly,
+        "polyline_mean_m": best_poly_mean,
+        "gps_points_in_trip": len(avl_trip_df)
+    })
+
+    # -----------------------------------------------------------
+    # PLOT MAP
+    # -----------------------------------------------------------
+    print("Creating map...")
+
+    best_poly_line = route_shapes[best_poly_tid]
+    poly_coords_ll = [(lat, lon) for lon, lat in best_poly_line.coords]
+
+    center = gps[len(gps)//2]
+    m = folium.Map(location=center, zoom_start=13)
+
+    # AVL trace
+    folium.PolyLine(gps, color="red", weight=4, opacity=0.8,
+                    tooltip=f"AVL Route: {route_name}").add_to(m)
+
+    # Polyline best route
+    folium.PolyLine(poly_coords_ll, color="blue", weight=4, opacity=0.8,
+                    tooltip=f"Static Best: {rn_poly}").add_to(m)
+
+    # Legend
+    legend = f"""
+    <div style="
+        position: fixed; 
+        bottom: 40px; left: 40px; width: 260px; height: 120px; 
+  background-color: white; border:2px solid grey; z-index:9999; font-size:14px;">
+        &nbsp;<b>Map Legend</b><br>
+ &nbsp;<span style='color:red;'>⬤</span> AVL Trace (Route {route_name})<br>
+ &nbsp;<span style='color:blue;'>⬤</span> Best Static Route ({rp_poly})<br>
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(legend))
+
+    map_path = f"{MAP_DIR}/{route_name}_best_polyline_match.html"
+    m.save(map_path)
+
+    print(f"Map saved: {map_path}")
+
+# ===============================================================
+# SAVE FINAL SUMMARY
+# ===============================================================
+final_df = pd.DataFrame(final_results)
+final_df.to_csv(OUTPUT_SUMMARY, index=False)
+
+print("\n=======================================================")
+print("FINAL SUMMARY (POLYLINE METHOD ONLY) SAVED TO:", OUTPUT_SUMMARY)
+print("=======================================================")
+print(final_df)
+
