@@ -1,0 +1,97 @@
+#Python code to fetch GTFS-RT data along a particular bus route
+
+import requests # For accessing websites
+from google.transit import gtfs_realtime_pb2 #Importing GTFS-realtime data feed from a particular URL
+from datetime import datetime
+import pytz # allows accurate and cross platform timezone calculations.
+import folium # visualize the data on a leaflet map
+import pandas as pd
+import os
+import time
+import csv
+
+pb_url='https://delhi.transportstack.in/api/dataset/otd/getfile?agency=delhi-buses&category=realtime_gtfs&filename=VehiclePositions.pb'
+header = {'x-api-key':'rZqp2F3GNAu1KjhnsqC1pDgtFUKLuq1j'}
+
+#os.chdir("C:/Users/rajan/OneDrive/Desktop/Python Workspace") 
+loc = os.path.dirname(os.path.realpath(__file__)) # Gives the current working directory of the script
+print(loc)
+colors = ['red', 'blue', 'green', 'purple', 'orange', 'darkred', 'lightred', 'black', 'cadetblue','darkpurple', 'white', 'darkgreen', 'lightblue', 'lightgreen', 'darkblue', 'lightgray']
+
+ist = pytz.timezone("Asia/Kolkata") # Indian Standard Time
+
+def plot_bus_on_map(map_obj, vehicle_id, vehicle_lat, vehicle_lon, vehicle_route_name, vehicle_datetime, color="yellow"):
+    coord = (vehicle_lat, vehicle_lon)
+    folium.CircleMarker(location=coord,radius=3,fill=True,  # Set fill to True
+   tooltip=f"{vehicle_id} {vehicle_route_name} {vehicle_datetime}",
+                        color=color, #random.choice(colors),
+                        fill_opacity=0.7).add_to(map_obj)
+    return map_obj
+
+routes = pd.read_csv(loc + "\\routes.txt")
+trips = pd.read_csv(loc + "\\trips.txt")
+stops = pd.read_csv(loc + "\\stops.txt")
+stop_times = pd.read_csv(loc + "\\stop_times.txt")
+gtfs = pd.merge(stop_times, trips, on = "trip_id")
+gtfs = pd.merge(gtfs, stops, on= "stop_id")
+gtfs = pd.merge(gtfs, routes, on= "route_id")
+
+def first_key_in_sorted_dict_with_value_greater_than(d, target):
+    for key in sorted(d):
+        if d[key] < target:
+            return key
+        
+route= "2140"
+
+route_gtfs = gtfs[(gtfs["route_id"] == int(route)) & (gtfs["stop_sequence"] == 0)]
+trip_times = {k["trip_id"]: int(k["departure_time"].split(":")[0])*3600 + int(k["departure_time"].split(":")[1])*60 + int(k["departure_time"].split(":")[2])  for a, k in route_gtfs.iterrows()}
+
+with open(loc + '\\avl_' + route + '.csv', 'w', newline='') as csvfile:
+    fieldnames = ['record_date', 'record_time', 'vehicle_id', 'route_id', 'route_name', 'trip_id', 'start_date', 'start_time', 'schedule_relationship', 'latitude', 'longitude', 'speed', 'datestamp', 'timestamp']
+writer = csv.writer(csvfile, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)
+    writer.writerow(fieldnames)
+    start = time.time()             # record the start time
+    for k in range(5):
+        print(f"Iteration: {k}, request time: {time.time() -start}")
+        current_datetime = datetime.now() # Current datetime
+        feed = gtfs_realtime_pb2.FeedMessage() 
+        try:
+
+response = requests.get(pb_url, headers=header, allow_redirects=True) # fetches the data from the given url
+            feed.ParseFromString(response.content) # it will parse the data from the response.content
+        except:
+            print(f"failed to get connection")
+            continue
+
+        for entity in [k for k in feed.entity if k.vehicle.trip.route_id == route]:
+            vehicle_timestamp = entity.vehicle.timestamp
+            vehicle_datetime = datetime.fromtimestamp(vehicle_timestamp, ist) # datetime stamp from the AVL
+            vehicle_id = entity.vehicle.trip.trip_id
+            #print(vehicle_id, vehicle_datetime.strftime("%d-%b-%Y"), current_datetime.strftime("%d-%b-%Y"))
+            
+#ifvehicle_datetime.strftime("%d-%b-%Y")==current_datetime.strftime("%d-%b-%Y"):
+vehicle_route_id = int(float(entity.vehicle.trip.route_id))
+start_date=datetime.strptime(entity.vehicle.trip.start_date,"%Y%m%d").strftime("%d-%m-%Y")
+            
+startTime=int(entity.vehicle.trip.start_time.split(":")[0])*3600+int(entity.vehicle.trip.start_time.split(":")[1])*60+int(entity.vehicle.trip.start_time.split(":")[2])
+            
+t = min(trip_times.items(), key=lambda item: abs(item[1] - startTime))[0]
+
+    if (routes[routes.route_id == vehicle_route_id].empty):
+               vehicle_route_name = ""
+    else:
+vehicle_route_name=routes[routes.route_id==vehicle_route_id].route_long_name.squeeze()
+mapObj= folium.Map(location=[28.63050230386396, 77.2109062352569], zoom_start=14, tiles = 'openstreetmap')
+
+folium.TileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', name='CartoDB.DarkMatter', attr="CartoDB.DarkMatter").add_to(mapObj)
+            
+for index, row  in gtfs[gtfs["trip_id"] == t].iterrows():  
+   mapObj = plot_bus_on_map(mapObj, vehicle_route_id, float(row["stop_lat"]), float(row["stop_lon"]), vehicle_route_name, vehicle_timestamp)         
+
+writer.writerow([current_datetime.strftime("%d-%m%Y"),current_datetime.strftime ("%H:%M:%S"), entity.vehicle.vehicle.id, vehicle_route_id, vehicle_route_name, entity.vehicle.trip.trip_id, start_date, entity.vehicle.trip.start_time, str(entity.vehicle.trip.schedule_relationship), str(entity.vehicle.position.latitude), str(entity.vehicle.position.longitude), str(entity.vehicle.position.speed), vehicle_datetime.strftime("%d-%m-%Y"), vehicle_datetime.strftime("%H:%M:%S")])
+            
+plot_bus_on_map(mapObj,entity.vehicle.vehicle.id,entity.vehicle.position.latitude,entity.vehicle.position.longitude,vehicle_route_name,vehicle_datetime.strftime("%H:%M:%S"), color="red")
+            
+mapObj.save(loc + "\\map_"+ t + "_" + current_datetime.strftime("%H-%M-%S") + "_.html")
+
+time.sleep(30)
